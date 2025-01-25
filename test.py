@@ -1,13 +1,11 @@
 import threading
 import time
+import socket
 
+server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+server.bind(("localhost", 8989))
 
-def sleeper():
-    print("sleeper started")
-    time.sleep(5)
-    print("sleeper ended")
-
-
-print("sleeper starting")
-threading.Thread(target=sleeper).start()
-print("sleeper called")
+while True:
+    time.sleep(2)
+    message, addres = server.recvfrom(1024)
+    print(message)

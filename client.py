@@ -10,7 +10,7 @@ class ClientSelectiveRepeat:
     def __init__(self, file_name, window_size=2) -> None:
         self.file_name = file_name  # To keep file name related client
         self.window_size = window_size
-        # self.sequence = 0
+        self.sequence = 0
         self.last_received = 0
         self.can_be_sent = window_size
         self.max_sequence = (

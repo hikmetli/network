@@ -2,6 +2,9 @@ import socket
 import threading
 import time
 import random
+from threading import Lock
+
+locker = Lock()
 
 
 class ServerSelectiveRepeat:
@@ -9,14 +12,14 @@ class ServerSelectiveRepeat:
         self.file_name = file_name  # To keep file name related client
         self.window_size = window_size
         self.sequence = 0
-        self.last_acked = 0
+        self.last_acked_seq = 0
         self.can_be_sent = window_size
         # this number can't be reached, will be used for mod operations
         self.max_sequence = window_size * 2
         self.window = [False] * window_size
         self.timers = [None] * window_size
-        self.time_out = 0.01
-        self.FIN = False
+        self.time_out = 1
+        self.fin = False
 
     def __progress(self):
         list_start = 0
@@ -25,14 +28,14 @@ class ServerSelectiveRepeat:
             self.window[list_start] = (
                 False  # To use the window like rounded list. opening some areas to it
             )
-            self.last_acked = (self.last_acked + 1) % self.max_sequence
+            self.last_acked_seq = (self.last_acked_seq + 1) % self.max_sequence
             self.can_be_sent += 1
             list_start += 1
 
     # Incoming seq number is the next sequence number, we need to increase it when putting in window
     def ack(self, seq):
         # before acking find the correct location of seq at the window
-        converted_seq = (self.last_acked + seq - 1) % self.window_size
+        converted_seq = (self.last_acked_seq + seq - 1) % self.window_size
         print("converted_seq = ", converted_seq)
         self.window[converted_seq] = True  # ack the package
         self.__progress()
@@ -48,7 +51,7 @@ class ServerSelectiveRepeat:
 
     def __give_info(self):
         print(
-            f"ServerRepeaterLog--\nlast acked:{self.last_acked}, window: {self.window},max sequence number: {self.max_sequence}"
+            f"ServerRepeaterLog--\nlast acked:{self.last_acked_seq}, window: {self.window},max sequence number: {self.max_sequence}"
         )
 
 
@@ -86,11 +89,15 @@ class Server:
         #     # TODO: read file and send using repeater..
         f = "selam"
         # TODO wait for ack
-        if self.sended >= len(f) and repeater.last_acked >= len(f):
+        if self.sended >= len(f) and repeater.last_acked_seq == (
+            self.sended % repeater.max_sequence
+        ):
             print("finishing...")
+            with locker:
+                repeater.fin = True
             self.unreliableSend(b"\x03", addr)
             return
-        while repeater.can_be_sent != 0:
+        while repeater.can_be_sent != 0 and self.sended < len(f) and not repeater.fin:
             payload = f[self.sended]
             message = (
                 b"\x02"
@@ -99,8 +106,10 @@ class Server:
                 + payload.encode()
             )
             self.unreliableSend(message, addr)
-            repeater.sent()
             self.sended += 1
+            # if file ends
+            if self.sended < len(f):
+                repeater.sent()
 
     def __ack_packege(self, addr, acked):
         repeater = self.clients.get(addr[0])
@@ -110,51 +119,60 @@ class Server:
         repeater.ack(acked)
 
     def __ack_controller(self, repeater, addr, f="selam"):
-        # if repeater.can_be_sent == 0:
-        while not repeater.FIN:
-            if self.sended >= len(f) and repeater.last_acked >= len(f):
-                repeater.FIN = True
-                self.__close_connection(repeater)
-                break
+        # if send operation is not finished
+        while not repeater.fin:
+            with Lock():
+                if repeater.last_acked_seq == (
+                    self.sended % repeater.max_sequence
+                ) and self.sended >= len(f):
+                    repeater.fin = True
+                    self.__close_connection(repeater)
+                    break
 
-            time.sleep(0.55)  # TODO might be removed
-            now = time.time()
-            for index, t in enumerate(repeater.timers):
-                # as sequence number is the next sequence we sent
-                sequence = (
-                    repeater.sequence - repeater.window_size + index
-                ) % repeater.max_sequence
-                # print("Controlling the timers...")
-                if (
-                    t is not None
-                    and now - t > repeater.time_out
-                    and not repeater.window[
-                        (sequence - repeater.last_acked) % repeater.window_size
-                    ]
-                ):
-                    print(
-                        "sending the sequence again...",
-                        sequence,
-                        "window value: ",
-                        # repeater.window[sequence - repeater.window_size + index],
-                        repeater.window,
-                        "repeater sequence:",
-                        repeater.sequence,
-                        "index:",
-                        index,
-                        "sended",
-                        self.sended,
-                        "window position:",
-                        (sequence - repeater.last_acked) % repeater.window_size,
-                    )
-                    payload = f[self.sended - repeater.window_size + index]
-                    message = (
-                        b"\x02"
-                        + self.__int_to_bytes(len(payload))
-                        + self.__int_to_bytes(sequence)
-                        + payload.encode()
-                    )
-                    self.unreliableSend(message, addr)
+                time.sleep(0.55)  # TODO might be removed
+
+                for index, t in enumerate(repeater.timers):
+                    now = time.time()
+                    # as sequence number is the next sequence we sent
+                    sequence = (
+                        repeater.sequence - repeater.window_size + index
+                    ) % repeater.max_sequence
+                    # print("Controlling the timers...")
+                    if (
+                        t is not None
+                        and now - t > repeater.time_out
+                        and not repeater.window[
+                            (sequence - repeater.last_acked_seq) % repeater.window_size
+                        ]
+                    ):
+                        print(
+                            "sending the sequence again...",
+                            sequence,
+                            "window value: ",
+                            # repeater.window[sequence - repeater.window_size + index],
+                            repeater.window,
+                            "repeater sequence:",
+                            repeater.sequence,
+                            "index:",
+                            index,
+                            "sended",
+                            self.sended,
+                            "window position:",
+                            (sequence - repeater.last_acked_seq) % repeater.window_size,
+                            "last_acked_seq:",
+                            repeater.last_acked_seq,
+                            "repeater_fin:",
+                            repeater.fin,
+                        )
+                        payload = f[self.sended - repeater.window_size + index]
+                        message = (
+                            b"\x02"
+                            + self.__int_to_bytes(len(payload))
+                            + self.__int_to_bytes(sequence)
+                            + payload.encode()
+                        )
+                        repeater.timers[index] = now
+                        self.unreliableSend(message, addr)
 
     def __listener(self):
         while True:
@@ -164,9 +182,8 @@ class Server:
             if data[0] == 0:
                 print("Handshake request came... accepting")
                 file_size = data[1]
-                file_name = data[
-                    2 : file_size + 2
-                ]  # +2 came because starting index is 2
+                # +2 came because starting index is 2
+                file_name = data[2 : file_size + 2]
                 self.__accept_connection(addr, file_name.decode())
                 print("Handshake request accepted, starting to send file...")
                 self.__send_file_package(addr)
@@ -182,7 +199,8 @@ class Server:
                 break
 
     def __close_connection(self, repeater):
-        repeater.FIN = True
+        with locker:
+            repeater.fin = True
         print("closing the connection")
 
     def __accept_connection(self, addr, file_name):
