@@ -80,6 +80,7 @@ class Client:
         self.sequence = 0
         self.max_payload_size = 255
         self.repeater = None
+        self.timeout = 0.001
 
     def __take_file(self, data):
         data_size = data[1]
@@ -103,6 +104,27 @@ class Client:
         )
 
     def __close_con(self):
+        # send ack to server.
+        self.__unreliableSend(
+            b"\x01" + self.__int_to_bytes(self.sequence), self.server_address
+        )
+        # send fin bit
+        self.__unreliableSend(
+            b"\x03" + self.__int_to_bytes(self.sequence), self.server_address
+        )
+
+        # wait for ack if timeout send fin again.
+        self.socket.setblocking(False)
+        # while True:
+        # wait duplicate of time out before close
+        time.sleep(2 * self.timeout)
+        try:
+            data = self.__unreliableRecv()
+            if data[0] == 1:
+                print("Fin ACKed, stopping")
+        except Exception:
+            # if nothing came close.
+            pass
         self.sequence = 0
         print("connection closing...")
 
@@ -115,6 +137,7 @@ class Client:
             elif data[0] == 2:  # this means file coming
                 self.__take_file(data)
             elif data[0] == 3:
+                last_sequence = data[1]
                 self.__close_con()
                 break
             else:
@@ -129,9 +152,10 @@ class Client:
         return self.socket.recvfrom(self.buffer_size)
 
     def listen_port(self):
-        listen_thread = threading.Thread(target=self.__listener)
+        # listen_thread = threading.Thread(target=self.__listener)
         print(f"Client starting to listen, server addres: {self.server_address}")
-        listen_thread.start()
+        self.__listener()
+        # listen_thread.start()
 
     def send_input(self):
         print("You can give inputs to send")

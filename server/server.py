@@ -20,6 +20,7 @@ class ServerSelectiveRepeat:
         self.timers = [None] * window_size
         self.time_out = 1
         self.fin = False
+        self.fin_ack = False
 
     def __progress(self):
         list_start = 0
@@ -68,8 +69,9 @@ class Server:
         # self.sequencer = ServerSelectiveRepeat(window_size)
         self.window_size = window_size
         self.sended = 0
+        self.time_out = 0.001
         # for debugging
-        self.send_success = [False, True, True, False, True]
+        # self.send_success = [False, True, True, False, True]
 
     def __int_to_bytes(self, num: int):
         return num.to_bytes(1, "big")
@@ -110,13 +112,24 @@ class Server:
             # if file ends
             if self.sended < len(f):
                 repeater.sent()
+            # Son paket gönderildi mi kontrolü
+        if self.sended >= len(f) and repeater.last_acked_seq == (
+            self.sended % repeater.max_sequence
+        ):
+            print("All data sent and ACKed. Sending FIN...")
+            fin_message = b"\x03" + self.__int_to_bytes(repeater.last_acked_seq)
+            self.unreliableSend(fin_message, addr)
+            repeater.fin = True
 
     def __ack_packege(self, addr, acked):
         repeater = self.clients.get(addr[0])
         if repeater is None:
             print("Can not ack the package, Client not Found!")
             return
-        repeater.ack(acked)
+        if repeater.fin:
+            repeater.fin_ack = True
+        else:
+            repeater.ack(acked)
 
     def __ack_controller(self, repeater, addr, f="selam"):
         # if send operation is not finished
@@ -129,7 +142,7 @@ class Server:
                     self.__close_connection(repeater)
                     break
 
-                time.sleep(0.55)  # TODO might be removed
+                time.sleep(0.05)  # TODO might be removed
 
                 for index, t in enumerate(repeater.timers):
                     now = time.time()
@@ -173,6 +186,11 @@ class Server:
                         )
                         repeater.timers[index] = now
                         self.unreliableSend(message, addr)
+        while repeater.fin and not repeater.fin_ack:
+            fin_message = b"\x03" + self.__int_to_bytes(repeater.last_acked_seq)
+            self.unreliableSend(fin_message, addr)
+            print("fin message send again...")
+            time.sleep(0.5)
 
     def __listener(self):
         while True:
@@ -191,7 +209,6 @@ class Server:
                 print("ACK came, acking...", data[1])
                 acked_sequence = data[1]
                 self.__ack_packege(addr, acked_sequence)
-
                 self.__send_file_package(addr)
 
             elif data[0] == 3:
@@ -199,8 +216,7 @@ class Server:
                 break
 
     def __close_connection(self, repeater):
-        with locker:
-            repeater.fin = True
+
         print("closing the connection")
 
     def __accept_connection(self, addr, file_name):
