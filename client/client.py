@@ -17,11 +17,18 @@ class ClientSelectiveRepeat:
             window_size * 2
         )  # this number can't be reached, will be used for mod operations
         self.window = [False] * window_size
+        self.window_content = [None] * window_size
+        with open(file_name, "x"):
+            pass  # Create the file to close directly, I ap opening it in 'with'
 
     def __progress(self):
         list_start = 0
         while list_start < len(self.window) and self.window[list_start]:
             print("first element is received, progressing....")
+            with open(self.file_name, "a") as f:
+                data = self.window_content[list_start]
+                if data is not None:
+                    f.write(data)
             self.window[list_start] = (
                 False  # To use the window like rounded list. opening some areas to it
             )
@@ -48,7 +55,7 @@ class ClientSelectiveRepeat:
         # In the rage
         return True
 
-    def receive(self, seq):  # After recieving a package
+    def receive(self, seq, data):  # After recieving a package
         if not self.__check_sequence(seq):
             # if sequenc number is not in the area we are looking send ack about it because it is already taken
             return seq + 1
@@ -58,6 +65,7 @@ class ClientSelectiveRepeat:
         print("converted_seq = ", converted_seq)
 
         self.window[converted_seq] = True  # sign package as received
+        self.window_content[converted_seq] = data
         self.__give_info()
         self.__progress()
         return (seq + 1) % (self.max_sequence)  # return the package which will be acked
@@ -90,7 +98,7 @@ class Client:
             print("Repeater is not initialized!!")
             return
         print("incoming data with sequence number:", seq_num, "data =", data)
-        ack_num = self.repeater.receive(seq_num)
+        ack_num = self.repeater.receive(seq_num, data.decode())
         # time.sleep(0.5)
         self.__send_ACK(ack_num)
 
