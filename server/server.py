@@ -18,7 +18,6 @@ class ServerSelectiveRepeat:
         self.time_out = 1  # TODO change this to 0.001
         self.fin = False
         self.fin_ack = False
-        self.file_offset = 0
         self.last_line_readed = False
 
         self.window_content = self.__initialize_window_content(window_size)
@@ -37,12 +36,11 @@ class ServerSelectiveRepeat:
         if self.last_line_readed:
             return None
         data = self.file.readline()
-        self.file_offset += 1
         return data
 
     def __progress(self):
         list_start = 0
-        while list_start < len(self.window) and self.window[list_start]:
+        while list_start < self.window_size and self.window[list_start]:
             print("first element is acked, progressing....")
             self.window[list_start] = (
                 False  # To use the window like rounded list. opening some areas to it
@@ -50,11 +48,15 @@ class ServerSelectiveRepeat:
             data = self.__read_from_file()
             if data == "":
                 self.last_line_readed = True
-            self.window_content.append(data)
-            # remove first element to slide window
-            self.window_content.pop(0)
+                print("last line readed")
+            if not self.last_line_readed:
+                self.window_content.append(data)
+                self.timers.append(None)
+                # remove first element to slide window
+                self.timers.pop(0)
+                self.window_content.pop(0)
+                self.can_be_sent += 1
             self.last_acked_seq = (self.last_acked_seq + 1) % self.max_sequence
-            self.can_be_sent += 1
             list_start += 1
 
     # Incoming seq number is the next sequence number, we need to increase it when putting in window
@@ -64,13 +66,15 @@ class ServerSelectiveRepeat:
         print("converted_seq = ", converted_seq)
         self.window[converted_seq] = True  # ack the package
         # set timer None to know this package is acked
-        self.timers[converted_seq] = None
+        # self.timers[converted_seq] = None
         self.__progress()
         self.__give_info()
 
     def sent(self):
         # Here I am setting the timer for this packet
-        self.timers[(self.sequence) % self.window_size] = time.time()
+        self.timers[(self.sequence + self.last_acked_seq) % self.window_size] = (
+            time.time()
+        )
         self.can_be_sent -= 1
         self.sequence = (self.sequence + 1) % (self.max_sequence)
         # Assign current time to handle loss
@@ -112,7 +116,6 @@ class Server:
         pass
 
     def __send_file_package(self, addr):
-        print("sending file")
         repeater = self.clients.get(addr[0])
         if repeater is None:
             print("Can not send the file, Client not Found!")
@@ -120,18 +123,24 @@ class Server:
         print(
             f"Sending the file..., sequence number = {repeater.sequence}, sended: ",
             self.sended,
+            "last_acked:",
+            repeater.last_acked_seq,
+            "timers : ",
+            repeater.timers,
         )
         #     # TODO: read file and send using repeater..
-        f = repeater
         # TODO wait for ack
-        if f == "" and repeater.last_acked_seq == (self.sended % repeater.max_sequence):
-            print("finishing...")
-            repeater.fin = True
-            self.unreliableSend(b"\x03", addr)
-            return
-        while repeater.can_be_sent != 0 and f != "" and not repeater.fin:
+        # if f == "" and repeater.last_acked_seq:
+        #     print("finishing...")
+        #     repeater.fin = True
+        #     self.unreliableSend(b"\x03", addr)
+        #     return
+        while repeater.can_be_sent != 0 and not repeater.fin:
             # send last added ones
-            payload = repeater.window_content[-repeater.can_be_sent]
+            payload = repeater.window_content[
+                (repeater.sequence + repeater.last_acked_seq) % repeater.window_size
+            ]
+            print("win content:", repeater.window_content)
             message = (
                 b"\x02"
                 + self.__int_to_bytes(len(payload))
@@ -144,7 +153,10 @@ class Server:
             repeater.sent()
 
         # Son paket gönderildi mi kontrolü
-        if f == "" and repeater.last_acked_seq == (self.sended % repeater.max_sequence):
+        print(self.sended, repeater.last_acked_seq)
+        if repeater.last_line_readed and repeater.last_acked_seq == (
+            self.sended % repeater.max_sequence
+        ):
             print("All data sent and ACKed. Sending FIN...")
             fin_message = b"\x03" + self.__int_to_bytes(repeater.last_acked_seq)
             self.unreliableSend(fin_message, addr)
@@ -155,6 +167,7 @@ class Server:
         if repeater is None:
             print("Can not ack the package, Client not Found!")
             return
+
         if repeater.fin:
             repeater.fin_ack = True
             return False  # return this was fin flag to finish
@@ -183,6 +196,7 @@ class Server:
                     repeater.sequence - repeater.window_size + index
                 ) % repeater.max_sequence
                 # print("Controlling the timers...")
+                # print("timer:", t, "index:", index)
                 if (
                     t is not None
                     and now - t > repeater.time_out
@@ -196,6 +210,8 @@ class Server:
                         "window value: ",
                         # repeater.window[sequence - repeater.window_size + index],
                         repeater.window,
+                        "window content",
+                        repeater.window_content,
                         "repeater sequence:",
                         repeater.sequence,
                         "index:",
@@ -208,6 +224,8 @@ class Server:
                         repeater.last_acked_seq,
                         "repeater_fin:",
                         repeater.fin,
+                        "timers",
+                        repeater.timers,
                     )
                     payload = repeater.window_content[index]
                     message = (
@@ -216,8 +234,8 @@ class Server:
                         + self.__int_to_bytes(sequence)
                         + payload.encode()
                     )
-                    repeater.timers[index] = now
                     self.unreliableSend(message, addr)
+                    repeater.timers[index] = now
         if repeater.fin and not repeater.fin_ack:
             fin_message = b"\x03" + self.__int_to_bytes(repeater.last_acked_seq)
             self.unreliableSend(fin_message, addr)
@@ -286,7 +304,7 @@ class Server:
             # controller_thread.start()  # will be stop after finishing the connection
 
     # TODO add the error logic
-    def unreliableSend(self, data, addr, error_rate=30):
+    def unreliableSend(self, data, addr, error_rate=70):
 
         if random.randint(1, 100) < error_rate:
             # if self.send_success[self.sended]:
